@@ -1,0 +1,81 @@
+name: CI
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17@sha256:b513c48566e4777cd3370451400000c78eda6a08131d68f4c31d4a76f27bd8fd
+        env:
+          POSTGRES_USER: support
+          POSTGRES_DB: support_ci
+          POSTGRES_PASSWORD: ci_only_ephemeral_database_password
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U support -d support_ci"
+          --health-interval 3s --health-timeout 3s --health-retries 30
+      redis:
+        image: redis:7.4-alpine@sha256:7f7d30b7fdd09467bac58198a1f166dd69789d348d4fe859cccb20e0cf287fbe
+        ports: ['6379:6379']
+    env:
+      APP_ENV: test
+      MODEL_PROVIDER: mock
+      DATABASE_URL: postgresql+psycopg://support:ci_only_ephemeral_database_password@localhost:5432/support_ci
+      TEST_DATABASE_URL: postgresql+psycopg://support:ci_only_ephemeral_database_password@localhost:5432/support_ci
+      REDIS_URL: redis://localhost:6379/0
+      DEMO_API_TOKEN: ci_only_ephemeral_demo_token_not_for_deployment
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with: {version: '0.12.23', python-version: '3.12'}
+      - run: uv sync --project apps/backend --frozen
+      - run: python3 -m unittest discover -s tests
+      - run: uv run --project apps/backend ruff check apps/backend
+      - run: uv run --project apps/backend ruff format --check apps/backend
+      - run: uv run --frozen python -m support_agent.initialize
+        working-directory: apps/backend
+      - run: uv run --project apps/backend pytest apps/backend/tests
+
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with: {node-version: '24'}
+      - run: npm install --global pnpm@11.25.0
+      - run: pnpm --dir apps/web install --frozen-lockfile
+      - run: pnpm --dir apps/web check
+      - run: pnpm --dir apps/web build
+
+  containers:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - run: python3 scripts/bootstrap.py
+      - run: docker compose -f compose.yaml -f compose.dev.yaml config --quiet
+      - run: docker build --target production -t support-backend:ci apps/backend
+      - run: docker build --target production -t support-web:ci apps/web
+      - name: Verify production-shaped images in local mock mode
+        env:
+          BACKEND_IMAGE: support-backend:ci
+          WEB_IMAGE: support-web:ci
+        run: |
+          docker compose -f compose.yaml -f compose.prod.yaml up -d --wait --wait-timeout 180
+          python3 scripts/smoke.py
+      - if: always()
+        run: docker compose -f compose.yaml -f compose.dev.yaml down
+
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with: {fetch-depth: 0}
+      - run: python3 scripts/scan_secrets.py

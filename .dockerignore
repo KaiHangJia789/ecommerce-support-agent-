@@ -1,0 +1,15 @@
+.git
+.env
+.env.*
+!.env.example
+**/node_modules
+**/.venv
+**/.next
+**/__pycache__
+.superpowers
+runtime
+uploads
+backups
+*.pem
+*.key
+*.log

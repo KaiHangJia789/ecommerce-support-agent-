@@ -1,0 +1,69 @@
+name: Publish images to ACR
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: acr-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: acr-publish
+    env:
+      ACR_REGISTRY: ${{ vars.ACR_REGISTRY }}
+      ACR_NAMESPACE: ${{ vars.ACR_NAMESPACE }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Validate destination
+        run: |
+          python3 - <<'PY'
+          import os, re
+          assert re.fullmatch(r'[a-z0-9.-]+', os.environ['ACR_REGISTRY']), 'Invalid registry'
+          assert re.fullmatch(r'[a-z0-9][a-z0-9_-]{1,63}', os.environ['ACR_NAMESPACE']), 'Invalid namespace'
+          PY
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ${{ vars.ACR_REGISTRY }}
+          username: ${{ secrets.ACR_USERNAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
+      - name: Publish backend
+        id: backend
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: ./apps/backend
+          target: production
+          platforms: linux/amd64
+          push: true
+          tags: ${{ vars.ACR_REGISTRY }}/${{ vars.ACR_NAMESPACE }}/support-backend:sha-${{ github.sha }}
+      - name: Publish web
+        id: web
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
+        with:
+          context: ./apps/web
+          target: production
+          platforms: linux/amd64
+          push: true
+          tags: ${{ vars.ACR_REGISTRY }}/${{ vars.ACR_NAMESPACE }}/support-web:sha-${{ github.sha }}
+      - name: Write release manifest
+        env:
+          BACKEND_DIGEST: ${{ steps.backend.outputs.digest }}
+          WEB_DIGEST: ${{ steps.web.outputs.digest }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          prefix = os.environ['ACR_REGISTRY'] + '/' + os.environ['ACR_NAMESPACE']
+          manifest = {
+              'revision': os.environ['GITHUB_SHA'], 'platform': 'linux/amd64',
+              'stage': 'p0-local-mock-only',
+              'backend_image': prefix + '/support-backend@' + os.environ['BACKEND_DIGEST'],
+              'web_image': prefix + '/support-web@' + os.environ['WEB_DIGEST'],
+          }
+          Path('release-manifest.json').write_text(json.dumps(manifest, indent=2))
+          PY
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with: {name: release-manifest, path: release-manifest.json, retention-days: 30}

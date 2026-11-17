@@ -1,0 +1,108 @@
+name: ${COMPOSE_PROJECT_NAME:?Run setup first}
+
+x-backend: &backend
+  image: ${BACKEND_IMAGE:-${COMPOSE_PROJECT_NAME}-backend:local}
+  environment: &backend-env
+    APP_ENV: ${APP_ENV:-development}
+    MODEL_PROVIDER: ${MODEL_PROVIDER:-mock}
+    DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-support}:${POSTGRES_PASSWORD:?Run setup first}@postgres:5432/${POSTGRES_DB:-support}
+    REDIS_URL: redis://redis:6379/0
+    DEMO_API_TOKEN: ${DEMO_API_TOKEN:?Run setup first}
+  networks: [internal]
+  init: true
+  restart: unless-stopped
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg17@sha256:b513c48566e4777cd3370451400000c78eda6a08131d68f4c31d4a76f27bd8fd
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-support}
+      POSTGRES_USER: ${POSTGRES_USER:-support}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Run setup first}
+    volumes: [postgres-data:/var/lib/postgresql/data]
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"']
+      interval: 3s
+      timeout: 3s
+      retries: 30
+    networks: [internal]
+    restart: unless-stopped
+
+  redis:
+    image: redis:7.4-alpine@sha256:7f7d30b7fdd09467bac58198a1f166dd69789d348d4fe859cccb20e0cf287fbe
+    command: [redis-server, --appendonly, 'yes', --maxmemory, 128mb, --maxmemory-policy, noeviction]
+    volumes: [redis-data:/data]
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+    networks: [internal]
+    restart: unless-stopped
+
+  migrate:
+    <<: *backend
+    command: [python, -m, support_agent.initialize]
+    restart: 'no'
+    depends_on:
+      postgres: {condition: service_healthy}
+
+  api:
+    <<: *backend
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+    healthcheck:
+      test: [CMD, python, -c, 'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8000/health/ready", timeout=3)']
+      interval: 5s
+      timeout: 4s
+      retries: 30
+      start_period: 10s
+
+  worker:
+    <<: *backend
+    command: [celery, -A, support_agent.worker:app, worker, --beat, --loglevel=WARNING, --concurrency=2, --schedule=/tmp/celerybeat-schedule]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+    healthcheck:
+      test: [CMD, celery, -A, support_agent.worker:app, inspect, ping, --timeout=3]
+      interval: 20s
+      timeout: 8s
+      retries: 5
+      start_period: 20s
+
+  web:
+    image: ${WEB_IMAGE:-${COMPOSE_PROJECT_NAME}-web:local}
+    environment: {NEXT_TELEMETRY_DISABLED: '1'}
+    networks: [internal]
+    init: true
+    restart: unless-stopped
+    healthcheck:
+      test: [CMD, node, -e, 'fetch("http://127.0.0.1:3000").then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))']
+      interval: 10s
+      timeout: 8s
+      retries: 15
+      start_period: 30s
+
+  nginx:
+    image: nginx:1.28-alpine@sha256:a8b39bd9cf0f83869a2162827a0caf6137ddf759d50a171451b335cecc87d236
+    ports: ['127.0.0.1:${HTTP_PORT:-18080}:80']
+    volumes: [./infra/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro]
+    depends_on:
+      api: {condition: service_healthy}
+      web: {condition: service_healthy}
+    networks: [internal]
+    restart: unless-stopped
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1/health/live]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+networks:
+  internal:
+
+volumes:
+  postgres-data:
+  redis-data:

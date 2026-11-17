@@ -1,0 +1,13 @@
+services:
+  migrate:
+    build: {context: ./apps/backend, target: development}
+  api:
+    build: {context: ./apps/backend, target: development}
+    command: [uvicorn, 'support_agent.main:create_app', --factory, --host, 0.0.0.0, --port, '8000', --reload, --no-access-log]
+    volumes: [./apps/backend/src:/app/src]
+  worker:
+    build: {context: ./apps/backend, target: development}
+    volumes: [./apps/backend/src:/app/src]
+  web:
+    build: {context: ./apps/web, target: development}
+    volumes: [./apps/web/src:/app/src, ./apps/web/public:/app/public]

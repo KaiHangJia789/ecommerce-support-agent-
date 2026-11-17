@@ -1,0 +1,23 @@
+# Production-shaped images. P0 remains a loopback-only mock; APP_ENV=production is rejected.
+# Use APP_ENV=development only for local verification of these image targets.
+services:
+  migrate:
+    image: ${BACKEND_IMAGE:?Set an image tag or digest}
+    environment: {APP_ENV: '${APP_ENV:-production}'}
+  api:
+    image: ${BACKEND_IMAGE:?Set an image tag or digest}
+    environment: {APP_ENV: '${APP_ENV:-production}'}
+    mem_limit: 512m
+    cpus: 1.0
+    security_opt: [no-new-privileges:true]
+  worker:
+    image: ${BACKEND_IMAGE:?Set an image tag or digest}
+    environment: {APP_ENV: '${APP_ENV:-production}'}
+    mem_limit: 768m
+    cpus: 1.0
+    security_opt: [no-new-privileges:true]
+  web:
+    image: ${WEB_IMAGE:?Set an image tag or digest}
+    mem_limit: 512m
+    cpus: 1.0
+    security_opt: [no-new-privileges:true]
